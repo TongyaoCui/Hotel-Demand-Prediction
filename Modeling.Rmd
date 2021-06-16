@@ -1,0 +1,404 @@
+---
+title: "Fall 1 Team Project Modeling"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+### Some auxiliary files to load
+source("installpackages.R")
+source("DataAnalyticsFunctions.R")
+library(tidyverse)
+
+library(tree)
+library(randomForest)
+library(libcoin)
+library(partykit)
+
+hotel <- read.csv("hotel.csv")
+hotel<-hotel %>% select(-X)
+```
+
+```{r}
+nfold <- 2 
+n <- nrow(hotel) # the number of observations
+### create a vector of fold memberships (random order)
+foldid <- rep(1:nfold,each=ceiling(n/nfold))[sample(1:n)]
+
+##
+model.logistic.interaction <-glm(factor(is_canceled)~.^2, data=hotel, subset=which(foldid==1), family="binomial")
+model.logistic <-glm(factor(is_canceled)~., data=hotel, subset=which(foldid==1), family="binomial")
+model.tree <- tree(factor(is_canceled)~ ., data=hotel, subset=which(foldid==1)) 
+model.null <- glm(factor(is_canceled)~1, data=hotel, subset=which(foldid==1), family="binomial")
+
+R2.model.logistic.interaction <-R2(y=factor(hotel$is_canceled[foldid==1]), pred=model.logistic.interaction$fitted, family="binomial")
+R2.model.logistic <- R2(y=factor(hotel$is_canceled[foldid==1]), pred=model.logistic$fitted, family="binomial")
+R2.model.tree     <-R2(y=factor(hotel$is_canceled[foldid==1]), pred=predict(model.tree, newdata=hotel[which(foldid==1),], type="vector")[,2], family="binomial")
+R2.model.null     <- 0
+# Model Fit via R2
+M1<- c("Summary of R2 for the three method:\n" )
+M2<- paste( " Logistic regression with interactions: R2 = ", R2.model.logistic.interaction,"\n")
+M3<- paste( " Logistic regression:                   R2 = ", R2.model.logistic,"\n")
+M4 <- paste(" Classification Tree:                   R2 = ", R2.model.tree,"\n")
+M5 <- paste(" Null:                                  R2 = ", R2.model.null,"\n")
+
+cat(M1,M2,M3,M4,M5)
+
+par(mar=c(1.5,1.5,1,1))
+par(mai=c(1.5,1.5,1,1))
+barplot(c(R2.model.logistic.interaction, R2.model.logistic, R2.model.tree, R2.model.null), las=2, xlab="", names = c("logistic \n interaction", "logistic ", "classif. \n tree","null \n"), ylab = bquote(R^2))
+
+
+### Logistic regression with interactions has better R2 than others.
+###
+### Lets plot FPR and TPR
+plot( c( 0, 1 ), c(0, 1), type="n", xlim=c(0,1), ylim=c(0,1), bty="n", xlab = "False positive rate", ylab="True positive rate")
+lines(c(0,1),c(0,1), lty=2)
+val<- .5
+values <- FPR_TPR( (model.logistic.interaction$fitted >= val) , model.logistic.interaction$y )
+points( values$FPR , values$TPR )
+ACC.model.logistic.interaction <- values$ACC
+text( values$FPR+.12, values$TPR+.05, labels=c("LR with interaction"))
+values <- FPR_TPR( (model.logistic$fitted >= val) , model.logistic$y )
+points( values$FPR , values$TPR)    
+ACC.model.logistic <- values$ACC
+text( values$FPR+.02, values$TPR, labels=c("LR"))
+values <- FPR_TPR( (predict(model.tree,type="class") == "Yes") , model.logistic.interaction$y )
+points( values$FPR , values$TPR )    
+ACC.model.tree <- values$ACC
+text( values$FPR, values$TPR-.02, labels=c("tree"))
+
+for( val in seq(from=0,to=1,by=0.05)){
+  values <- FPR_TPR( (model.logistic.interaction$fitted >= val) , model.logistic.interaction$y )
+  points( values$FPR , values$TPR, pch = 21, bg="red" )
+  values <- FPR_TPR( (model.logistic$fitted >= val) , model.logistic$y )
+  points( values$FPR , values$TPR, pch = 22, bg="blue" )    
+  values <- FPR_TPR( (predict(model.tree,type="vector")[,2] >= val) , model.logistic.interaction$y )
+  points( values$FPR , values$TPR, pch = 23, bg="green" )    
+}
+
+### Accuracy of the model
+barplot(c(ACC.model.logistic.interaction, ACC.model.logistic, ACC.model.tree), xpd=FALSE, ylim=c(.75,.9), xlab="Method", names = c("\n logistic \n interaction", "\n logistic \n", "\n classif. \n tree"), ylab = "Accuracy")
+
+### How many coefficients in the model?
+nrow(summary(model.logistic.interaction)$coef)
+### we have a lot of dummy variables; we actually had 
+length(model.logistic.interaction$coef)
+### but 454-263=191 were compeltely redundant. 
+### do you think all of them matter? Lets look at p-values
+pvals<-summary(model.logistic.interaction)$coef[,4]
+hist(pvals, breaks = seq(from=0,to=1,by=0.05), xlab="p-values", main="P-values of Logistic regression model with interactions", col="lightblue")
+
+```
+```{r}
+###################################################
+## Out of sample prediction experiment
+##
+## We started with Holdout sample which splits the 
+## sample in 2 parts. 
+## Later we did k-fold CV which splits the data into k "folds". 
+## The code below allows for that by setting the variable 
+## nfold to the value you would like.
+## 
+## We start with nfold <- 2 and use first part for training
+###################################################
+### HOLDOUT SAMPLE
+###
+###################################################
+### create an empty dataframe of results
+OOS <- data.frame(logistic.interaction=NA, logistic=NA, tree=NA, null=NA) 
+
+### Set the second part for testing (first for training)
+k <- 2
+### Set the other part for training (if not k)
+train <- which(foldid!=k) # train on all but fold `k'
+test  <- which(foldid==k) # test on fold k
+
+### Do not worry about the warning messages. 
+### These are minor numerical issues in this case.
+model.logistic.interaction <-glm(factor(is_canceled)~.^2, data=hotel, subset=train, family="binomial")
+model.logistic <-glm(factor(is_canceled)~., data=hotel, subset=train,family="binomial")
+model.tree <- tree(factor(is_canceled)~ ., data=hotel, subset=train) 
+model.null <- glm(factor(is_canceled)~1, data=hotel, subset=train, family="binomial")
+
+## get predictions: type=response so we have probabilities
+pred.logistic.interaction <- predict(model.logistic.interaction, newdata=hotel[-train,], type="response")
+pred.logistic             <- predict(model.logistic, newdata=hotel[-train,], type="response")
+pred.tree                 <- predict(model.tree, newdata=hotel[-train,], type="vector")
+pred.tree <- pred.tree[,2]
+pred.null <- predict(model.null, newdata=hotel[-train,], type="response")
+
+## calculate and log R2
+# Logistic Interaction
+OOS$logistic.interaction <- R2(y=factor(hotel$is_canceled[-train]), pred=pred.logistic.interaction, family="binomial")
+# Logistic
+OOS$logistic <- R2(y=factor(hotel$is_canceled[-train]), pred=pred.logistic, family="binomial")
+# Tree
+OOS$tree <- R2(y=factor(hotel$is_canceled[-train]), pred=pred.tree, family="binomial")
+#Null model (just intercept)
+OOS$null <- R2(y=factor(hotel$is_canceled[-train]), pred=pred.null, family="binomial")
+#Null Model guess
+sum(hotel$is_canceled[train]==1)/length(train)
+
+```
+
+```{r}
+### Lets list the results stored in the dataframe OOS
+OOS
+###
+### The null essentially 0 (as we would expect)
+### However, the logistic with interaction was overfitting the data
+### and the other two models had a better OOS R squares 
+### Note that the actual value might change a bit with the 
+### random number generator when we spliut the sample.
+###
+### Note that each observation was used 
+### either to train OR to test. Not both.
+###
+### Cross validation (below) improves on that.
+###
+###################################################
+### K-Fold cross validation
+###
+### Essentially the same code as before just that 
+### we will use more folds and plot the uncertainty
+### Number of OOS validation `folds'
+
+### K Fold Cross Validation
+###
+### create a vector of fold memberships (random order)
+nfold <- 5
+foldid <- rep(1:nfold,each=ceiling(n/nfold))[sample(1:n)]
+### create an empty dataframe of results
+OOS <- data.frame(logistic.interaction=rep(NA,nfold), logistic=rep(NA,nfold), tree=rep(NA,nfold), null=rep(NA,nfold)) 
+
+### Use a for loop to run through the nfold trails
+for(k in 1:nfold){ 
+  train <- which(foldid!=k) # train on all but fold `k'
+  
+  ## fit the two regressions and null model
+  model.logistic.interaction <-glm(factor(is_canceled)~.^2, data=hotel, subset=train, family="binomial")
+  model.logistic <-glm(factor(is_canceled)~., data=hotel, subset=train,family="binomial")
+  model.tree <- tree(factor(is_canceled)~ ., data=hotel, subset=train) 
+  model.nulll <-glm(factor(is_canceled)~1, data=hotel, subset=train,family="binomial")
+  ## get predictions: type=response so we have probabilities
+  pred.logistic.interaction <- predict(model.logistic.interaction, newdata=hotel[-train,], type="response")
+  pred.logistic             <- predict(model.logistic, newdata=hotel[-train,], type="response")
+  pred.tree                 <- predict(model.tree, newdata=hotel[-train,], type="vector")
+  pred.tree <- pred.tree[,2]
+  pred.null <- predict(model.nulll, newdata=hotel[-train,], type="response")
+  
+  ## calculate and log R2
+  # Logistic Interaction
+  OOS$logistic.interaction[k] <- R2(y=factor(hotel$is_canceled[-train]), pred=pred.logistic.interaction, family="binomial")
+  OOS$logistic.interaction[k]
+  # Logistic
+  OOS$logistic[k] <- R2(y=factor(hotel$is_canceled[-train]), pred=pred.logistic, family="binomial")
+  OOS$logistic[k]
+  # Tree
+  OOS$tree[k] <- R2(y=factor(hotel$is_canceled[-train]), pred=pred.tree, family="binomial")
+  OOS$tree[k]
+  #Null
+  OOS$null[k] <- R2(y=factor(hotel$is_canceled[-train]), pred=pred.null, family="binomial")
+  OOS$null[k]
+  #Null Model guess
+  sum(hotel$is_canceled[train]==1)/length(train)
+  
+  ## We will loop this nfold times (I setup for 10)
+  ## this will print the progress (iteration that finished)
+  print(paste("Iteration",k,"of",nfold,"(thank you for your patience)"))
+}
+### Do not worry about the warning messages. 
+### These are minor numerical issues in this case.
+### 
+### Lets list the mean of the results stored in the dataframe OOS
+### we have nfold values in OOS for each model, this computes the mean of them)
+colMeans(OOS)
+m.OOS <- as.matrix(OOS)
+rownames(m.OOS) <- c(1:nfold)
+barplot(t(as.matrix(OOS)), beside=TRUE, legend=TRUE, args.legend=c(xjust=1, yjust=0.5),
+        ylab= bquote( "Out of Sample " ~ R^2), xlab="Fold", names.arg = c(1:10))
+
+```
+
+```{r}
+library(glmnet)
+#### Lets run Lasso
+#### First lets set up the data for it
+#### the features need to be a matrix ([,-1] removes the first column which is the intercept)
+Mx<- model.matrix(is_canceled ~ .^2, data=hotel)[,-1]
+My<- hotel$is_canceled == 1
+### This defined the features we will use the matrix Mx (X) and the target My (Y)
+###
+#### Lasso requires a penalty parameter lambda
+num.features <- ncol(Mx)
+num.n <- nrow(Mx)
+num.churn <- sum(My)
+w <- (num.churn/num.n)*(1-(num.churn/num.n))
+#### For the binomial case, a theoretically valid choice is
+lambda.theory <- sqrt(w*log(num.features/0.05)/num.n)
+### next we call Lasso providing the 
+### features as matrix Mx
+### the target as a vector My
+### telling it is for logistic, family="binomial"
+### and specifying lambda = lambda.theory
+lassoTheory <- glmnet(Mx,My, family="binomial",lambda = lambda.theory)
+### by calling the summary we see the list of object in sclassoTheory
+summary(lassoTheory)
+### lassoTheory$a0 gives you the intercept
+### lassoTheory$beta gives you all the coefficients. Many were set to zero.
+### lassoTheory$lambda has the value of lambda stored.
+### We can see the support of the selected coeffcients
+### these are the indices
+support(lassoTheory$beta)
+### these are the labels
+colnames(Mx)[support(lassoTheory$beta)]
+### there are in total
+length(support(lassoTheory$beta))
+### coefficients selected by the model using the theoretical choice 
+
+### If we omit the lambda, the function will solve for all values of lambda
+### it takes a bit longer but not much longer at all. 
+lasso <- glmnet(Mx,My, family="binomial")
+### By running for all vaules of lambda we get many models back
+### now we have the summary
+summary(lasso)
+### the length of lambda = 100. This means that it stored 
+### the solutions for 100 different values of lambda.
+### for each lambda we have an intercept a0 and 453 coefficients
+### now lasso$a0 is a vector with 100 components (one for each lambda)
+### and lasso$beta is a matrix of 453 x 100 components 
+### (each columns corresponds to a solution for a value of lambda)
+### These are the first 5 values
+lasso$lambda[1:5]
+### They are in decreasing order so the most sparse solution is beta[,1]
+### For each coefficient we can plot its "Path" as we change lambda
+par(mar=c(1.5,1.5,0.75,1.5))
+par(mai=c(1.5,1.5,0.75,1.5))
+
+## Make 2 plots side by side: mfrow=c(1,2)  # c(nrow,ncol)
+par(mfrow=c(1,2))
+coef_ind <- 5
+par(mar=c(1.5,0.5,0.75,0.5))
+par(mai=c(1.5,0.5,0.75,0.5))
+plot(log(lasso$lambda),lasso$beta[coef_ind,], ylab="Coefficient value", main=paste("Coefficient for",colnames(Mx)[coef_ind]),xlab = expression(paste("log(",lambda,")")),type="l")
+coef_ind <- 2
+par(mar=c(1.5,0.5,0.75,0.5))
+par(mai=c(1.5,0.5,0.75,0.5))
+
+plot(log(lasso$lambda),lasso$beta[coef_ind,], ylab="Coefficient value", main=paste("Coefficient for",colnames(Mx)[coef_ind]),xlab = expression(paste("log(",lambda,")")),type="l")
+
+## make it back to 1 plot only
+par(mfrow=c(1,1))
+par(mar=c(1.5,1.5,1.5,1.5))
+par(mai=c(1.5,1.5,1.5,1.5))
+plot(lasso, xvar="lambda", main="# of non-zero coefficients", ylab ="Coefficient values", xlab = expression(paste("log(",lambda,")")))
+```
+
+```{r}
+### Now that we can actually compute the Lasso for all values of lambda,
+### the whole "path" of models can be evaluated by a OOS experiment
+### we can attempt to use cross valiadation to actually pick lambda.
+### the following command yields a cross validation procedure
+### the following command takes some time.
+lassoCV <- cv.glmnet(Mx,My, family="binomial")
+### We can plot the fitting graph
+### red dots are mean values and the bars are the uncertainty
+par(mar=c(1.5,1.5,2,1.5))
+par(mai=c(1.5,1.5,2,1.5))
+plot(lassoCV, main="Fitting Graph for CV Lasso \n \n # of non-zero coefficients  ", xlab = expression(paste("log(",lambda,")")))
+
+### There are some rules that people like to use:
+### The minimum of the mean values stored in lambda.min
+### 1se to the right stored in lambda.1se
+### if we had to compute lambda.min we can simply write
+lassoCV$lambda[which.min(lassoCV$cvm)]
+### sclassoCV$cvm has the mean values
+### which.min(sclassoCV$cvm) returns the index that minimizes it
+### and remember that sclassoCV$lambda is the vector of lambda
+### in any case we have lambda.min and lambda.1se.
+### 
+### lambda.min is perceived as aggressive (picks too many variables)
+### lambda.1se is perceived as conservative (picks too few variables)
+###
+### Btw, where do you think the Theoretical one stands?
+### we plot them in the previous picture
+text(log(lassoCV$lambda.min), .95,"min",cex=1)
+text(log(lassoCV$lambda.1se), 1,"1se",cex=1)
+
+lines(c(log(lambda.theory),log(lambda.theory)),c(0.3,2.4),lty=3,col="blue")
+text(log(lambda.theory), 1.05,"theory",cex=1)
+### The theory one is between them! without any computation!
+### either the theory work or we are a bit lucky today.
+```
+
+```{r}
+PL.OOS <- data.frame(PL.min=rep(NA,nfold), PL.1se=rep(NA,nfold), PL.theory=rep(NA,nfold)) 
+L.OOS <- data.frame(L.min=rep(NA,nfold), L.1se=rep(NA,nfold), L.theory=rep(NA,nfold)) 
+features.min <- support(lasso$beta[,which.min(lassoCV$cvm)])
+length(features.min)
+features.1se <- support(lasso$beta[,which.min( (lassoCV$lambda-lassoCV$lambda.1se)^2)])
+length(features.1se) 
+features.theory <- support(lassoTheory$beta)
+length(features.theory)
+
+data.min <- data.frame(Mx[,features.min],My)
+data.1se <- data.frame(Mx[,features.1se],My)
+data.theory <- data.frame(Mx[,features.theory],My)
+
+
+for(k in 1:nfold){ 
+  train <- which(foldid!=k) # train on all but fold `k'
+  
+  ### This is the CV for the Post Lasso Estimates
+  rmin <- glm(My~., data=data.min, subset=train, family="binomial")
+  if ( length(features.1se) == 0){  r1se <- glm(Churn~1, data=churndata, subset=train, family="binomial") 
+  } else {r1se <- glm(My~., data=data.1se, subset=train, family="binomial")
+  }
+  
+  if ( length(features.theory) == 0){ 
+    rtheory <- glm(Churn~1, data=churndata, subset=train, family="binomial") 
+  } else {rtheory <- glm(My~., data=data.theory, subset=train, family="binomial") }
+  
+  
+  predmin <- predict(rmin, newdata=data.min[-train,], type="response")
+  pred1se  <- predict(r1se, newdata=data.1se[-train,], type="response")
+  predtheory <- predict(rtheory, newdata=data.theory[-train,], type="response")
+  PL.OOS$PL.min[k] <- R2(y=My[-train], pred=predmin, family="binomial")
+  PL.OOS$PL.1se[k] <- R2(y=My[-train], pred=pred1se, family="binomial")
+  PL.OOS$PL.theory[k] <- R2(y=My[-train], pred=predtheory, family="binomial")
+
+  ### This is the CV for the Lasso estimates  
+  lassomin  <- glmnet(Mx[train,],My[train], family="binomial",lambda = lassoCV$lambda.min)
+  lasso1se  <- glmnet(Mx[train,],My[train], family="binomial",lambda = lassoCV$lambda.1se)
+  lassoTheory <- glmnet(Mx[train,],My[train], family="binomial",lambda = lambda.theory)
+   
+  predlassomin <- predict(lassomin, newx=Mx[-train,], type="response")
+  predlasso1se  <- predict(lasso1se, newx=Mx[-train,], type="response")
+  predlassotheory <- predict(lassoTheory, newx=Mx[-train,], type="response")
+  L.OOS$L.min[k] <- R2(y=My[-train], pred=predlassomin, family="binomial")
+  L.OOS$L.1se[k] <- R2(y=My[-train], pred=predlasso1se, family="binomial")
+  L.OOS$L.theory[k] <- R2(y=My[-train], pred=predlassotheory, family="binomial")
+  
+  print(paste("Iteration",k,"of",nfold,"completed"))
+}
+
+
+R2performance <- cbind(PL.OOS,L.OOS, OOS)
+par( mar=  c(8, 4, 4, 2) + 0.6 )
+#names(OOS)[1] <-"logistic\ninteraction"
+barplot(colMeans(R2performance), las=2,xpd=FALSE, ylim=c(0,.3) , xlab="", ylab = bquote( "Average Out of Sample " ~ R^2))
+#names(OOS)[1] <-"logistic.interaction"
+m.OOS <- as.matrix(R2performance)
+rownames(m.OOS) <- c(1:nfold)
+par(mar=c(1.5,1.5,1.5,3))
+par(mai=c(1.5,1.5,1.5,3))
+barplot(t(as.matrix(m.OOS)), beside=TRUE, ylim=c(0,.4) ,legend=TRUE, args.legend=c(x= "topright", y=0.92,bty = "n"),
+        ylab= bquote( "Out of Sample " ~ R^2), xlab="Fold", names.arg = c(1:10))
+
+
+```
+
